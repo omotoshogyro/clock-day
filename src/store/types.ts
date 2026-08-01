@@ -10,17 +10,8 @@ export type RangeItem = {
   markerId: MarkerId;
 };
 
-export type StickerItem = {
-  id: string;
-  kind: "heart";
-  /** Screen-space angle on the dial, degrees (-90 = 12 o'clock). */
-  angleDeg: number;
-  radius: number;
-};
-
 export type DayPlan = {
   ranges: RangeItem[];
-  stickers: StickerItem[];
 };
 
-export const EMPTY_DAY: DayPlan = { ranges: [], stickers: [] };
+export const EMPTY_DAY: DayPlan = { ranges: [] };

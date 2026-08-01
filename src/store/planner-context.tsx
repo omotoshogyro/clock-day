@@ -10,7 +10,7 @@ import {
 import type { MarkerId } from "../constants";
 import { dayKeyOf, parseDayKey } from "../time";
 import { seedMonth, seedShowcaseDay } from "./seed";
-import { EMPTY_DAY, type DayPlan, type RangeItem, type StickerItem } from "./types";
+import { EMPTY_DAY, type DayPlan, type RangeItem } from "./types";
 
 type State = {
   byDay: Record<string, DayPlan>;
@@ -28,10 +28,7 @@ type Action =
   | { type: "setMarker"; markerId: MarkerId }
   | { type: "addRange"; range: RangeItem }
   | { type: "updateRange"; id: string; patch: Partial<RangeItem> }
-  | { type: "deleteRange"; id: string }
-  | { type: "addSticker"; sticker: StickerItem }
-  | { type: "moveSticker"; id: string; angleDeg: number; radius: number }
-  | { type: "deleteSticker"; id: string };
+  | { type: "deleteRange"; id: string };
 
 function monthKey(year: number, month: number) {
   return `${year}-${month}`;
@@ -121,28 +118,6 @@ function reducer(state: State, action: Action): State {
       };
     }
 
-    case "addSticker":
-      return withDay(state, state.selectedDay, (d) => ({
-        ...d,
-        stickers: [...d.stickers, action.sticker],
-      }));
-
-    case "moveSticker":
-      return withDay(state, state.selectedDay, (d) => ({
-        ...d,
-        stickers: d.stickers.map((s) =>
-          s.id === action.id
-            ? { ...s, angleDeg: action.angleDeg, radius: action.radius }
-            : s
-        ),
-      }));
-
-    case "deleteSticker":
-      return withDay(state, state.selectedDay, (d) => ({
-        ...d,
-        stickers: d.stickers.filter((s) => s.id !== action.id),
-      }));
-
     default:
       return state;
   }
@@ -158,9 +133,6 @@ type Ctx = State & {
   addRange: (range: RangeItem) => void;
   updateRange: (id: string, patch: Partial<RangeItem>) => void;
   deleteRange: (id: string) => void;
-  addSticker: (sticker: StickerItem) => void;
-  moveSticker: (id: string, angleDeg: number, radius: number) => void;
-  deleteSticker: (id: string) => void;
 };
 
 const PlannerContext = createContext<Ctx | null>(null);
@@ -186,10 +158,6 @@ export function PlannerProvider({ children }: { children: ReactNode }) {
       addRange: (range) => dispatch({ type: "addRange", range }),
       updateRange: (id, patch) => dispatch({ type: "updateRange", id, patch }),
       deleteRange: (id) => dispatch({ type: "deleteRange", id }),
-      addSticker: (sticker) => dispatch({ type: "addSticker", sticker }),
-      moveSticker: (id, angleDeg, radius) =>
-        dispatch({ type: "moveSticker", id, angleDeg, radius }),
-      deleteSticker: (id) => dispatch({ type: "deleteSticker", id }),
     }),
     [state, planFor]
   );

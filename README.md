@@ -1,8 +1,8 @@
 # Clockday
 
 A day planner where a live analog clock is the canvas. You paint time ranges
-onto dotted tracks around the face with highlighter markers, name them, colour
-them, and drop stickers. Expanding the date header reveals a month calendar
+onto dotted tracks around the face with highlighter markers, name them, and
+colour them. Expanding the date header reveals a month calendar
 where every day wears a miniature ring of its own arcs.
 
 ## The idea
@@ -62,8 +62,11 @@ Two rendering rules worth knowing before editing:
   so a drag or a ticking second hand never re-renders React. The calendar's 42
   day-rings are likewise one canvas, not 42.
 - **One gesture.** `clockday-screen.tsx` has a single `Gesture.Pan()` that
-  resolves sticker / handle / arc / empty-track in `onBegin` and acts only in
+  resolves handle / arc / empty-track in `onBegin` and acts only in
   `onFinalize`. Stacking a handler per arc is what makes pans phantom-fire.
+  A tap on a handle is *provisional* (`MAYBE_RESIZE`) and only becomes a resize
+  once the finger travels `TAP_SLOP` — that is what leaves single/double taps
+  detectable on short ranges, where the whole arc sits inside a grab radius.
 
 Curved labels use Skia's `<TextPath>` with `matchFont` — a system typeface, so
 there is no font asset to bundle. Glyphs stand perpendicular to the direction of
