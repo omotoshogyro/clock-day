@@ -1,21 +1,7 @@
 import { MARKERS, type MarkerId } from "../constants";
+import { mulberry32 } from "../rand";
 import { dayKey, daysInMonth } from "../time";
 import type { DayPlan, RangeItem } from "./types";
-
-/**
- * mulberry32 — a tiny deterministic PRNG. Seeding from the date means the
- * calendar's coloured rings are stable across re-renders and app restarts
- * instead of reshuffling every time the grid mounts.
- */
-function mulberry32(seed: number) {
-  let a = seed >>> 0;
-  return function next(): number {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
 
 const TITLES = [
   "Beach",
@@ -63,7 +49,7 @@ export function seedDay(year: number, month: number, day: number): DayPlan {
     cursor += durationMin + 30 + Math.floor(rand() * 6) * 30; // gap
   }
 
-  return { ranges, stickers: [] };
+  return { ranges };
 }
 
 export function seedMonth(
@@ -114,6 +100,5 @@ export function seedShowcaseDay(key: string): DayPlan {
         markerId: "pink",
       },
     ],
-    stickers: [{ id: `${key}-heart`, kind: "heart", angleDeg: 0, radius: 152 }],
   };
 }

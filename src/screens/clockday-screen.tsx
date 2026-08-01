@@ -1,6 +1,7 @@
+import type { BottomSheetModal } from "@gorhom/bottom-sheet";
 import * as Haptics from "expo-haptics";
 import { StatusBar } from "expo-status-bar";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Keyboard, StyleSheet, View } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { useKeyboardHandler } from "react-native-keyboard-controller";
@@ -15,20 +16,15 @@ import { scheduleOnRN } from "react-native-worklets";
 
 import { ClockCanvas } from "../clock/clock-canvas";
 import { useDialFonts } from "../clock/fonts";
-import { StickerLayer } from "../clock/sticker-layer";
 import { useNow } from "../clock/use-now";
 import {
   CANVAS,
-  CX,
-  CY,
   GRAB_R,
   KB_LIFT_FACTOR,
   KB_LIFT_MAX,
   KB_SCALE_MIN,
   MARKER_BY_ID,
   QUICK,
-  R_AM,
-  R_PM,
   type MarkerId,
 } from "../constants";
 import {
@@ -37,10 +33,11 @@ import {
   deltaDeg,
   distToMinute,
   hitTrack,
+  minutesPerPx,
   rangeContains,
+  rangeNear,
 } from "../geometry";
 import { usePlanner } from "../store/planner-context";
-import type { RangeItem } from "../store/types";
 import { useTheme } from "../theme";
 import {
   MIN_PER_DAY,
@@ -50,6 +47,7 @@ import {
   snapMin,
   sweepMin,
 } from "../time";
+import { AppearanceSheet } from "../ui/appearance-sheet";
 import { CalendarPanel } from "../ui/calendar-panel";
 import { DayHeader } from "../ui/day-header";
 import { LabelBar } from "../ui/label-bar";
@@ -60,15 +58,25 @@ const IDLE = 0;
 const CREATE = 1;
 const RESIZE_START = 2;
 const RESIZE_END = 3;
-const MOVE_STICKER = 4;
-const SELECT = 5;
-const DESELECT = 6;
+const SELECT = 4;
+const DESELECT = 5;
+/** Pressed a handle — resize or tap is not decided yet. See onUpdate. */
+const MAYBE_RESIZE = 6;
 
 const MIN_SWEEP = SNAP; // a range is never shorter than one snap step
 
-type Pending = {
-  /** Present when an existing range is being renamed rather than created. */
-  id?: string;
+/**
+ * Travel that turns a press on a handle into a resize. `.minDistance(0)` means
+ * onUpdate fires on a pixel of jitter, so this has to be comfortably above the
+ * noise floor; 8 is roughly iOS's own touch slop.
+ */
+const TAP_SLOP = 8;
+const DOUBLE_TAP_MS = 300;
+/** Half a short range's label overhang — see `rangeNear`. */
+const TAP_PAD_PX = 14;
+
+/** A range that has been drawn but not yet committed to the store. */
+type DraftRange = {
   startMin: number;
   endMin: number;
   markerId: MarkerId;
@@ -83,12 +91,35 @@ export function ClockdayScreen() {
   const planner = usePlanner();
 
   const [calendarOpen, setCalendarOpen] = useState(false);
-  const [stickerArmed, setStickerArmed] = useState(false);
-  const [pending, setPending] = useState<Pending | null>(null);
+  /** Set only while a freshly drawn range is waiting for a name. */
+  const [draftRange, setDraftRange] = useState<DraftRange | null>(null);
+  /** Set only while an existing range has its name open for editing. */
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [kbVisible, setKbVisible] = useState(false);
   /** True only while an end handle is under the finger. */
   const [resizing, setResizing] = useState(false);
+
+  // Gesture callbacks are dependencies of the Pan, and the Pan must not be
+  // rebuilt mid-session — a re-attached handler is what makes pans
+  // phantom-fire. So anything the callbacks need to *read* but that changes
+  // often (a keystroke, an open editor) is mirrored into a ref instead.
+  const titleRef = useRef("");
+  const editingIdRef = useRef<string | null>(null);
+  const draftRangeRef = useRef<DraftRange | null>(null);
+  const lastTapRef = useRef<{ id: string; at: number }>({ id: "", at: 0 });
+
+  const sheetRef = useRef<BottomSheetModal>(null);
+
+  useEffect(() => {
+    titleRef.current = title;
+  }, [title]);
+  useEffect(() => {
+    editingIdRef.current = editingId;
+  }, [editingId]);
+  useEffect(() => {
+    draftRangeRef.current = draftRange;
+  }, [draftRange]);
 
   useEffect(() => {
     const show = Keyboard.addListener("keyboardWillShow", () =>
@@ -102,8 +133,6 @@ export function ClockdayScreen() {
       hide.remove();
     };
   }, []);
-
-  const marker = MARKER_BY_ID[planner.markerId];
 
   // ---- UI-thread drivers ----
   const mode = useSharedValue(IDLE);
@@ -121,7 +150,12 @@ export function ClockdayScreen() {
   const baseSweep = useSharedValue(0);
   const lastTickMin = useSharedValue(-1);
   const dragId = useSharedValue<string | null>(null);
-  const stickerIdx = useSharedValue(-1);
+  const beginX = useSharedValue(0);
+  const beginY = useSharedValue(0);
+  /** Which end MAYBE_RESIZE promotes to. */
+  const resizeSide = useSharedValue(RESIZE_START);
+  /** What a MAYBE_RESIZE selects if it turns out to be a tap. */
+  const tapId = useSharedValue<string | null>(null);
 
   // Mirrors of React state that the gesture worklet needs to read.
   const rangesSV = useSharedValue<
@@ -132,11 +166,13 @@ export function ClockdayScreen() {
     startMin: number;
     endMin: number;
   } | null>(null);
-  const stickersSV = useSharedValue<
-    { id: string; x: number; y: number }[]
-  >([]);
 
-  const { ranges, stickers } = planner.day;
+  const { ranges } = planner.day;
+
+  const selectedRange = useMemo(
+    () => ranges.find((r) => r.id === planner.selectedRangeId) ?? null,
+    [ranges, planner.selectedRangeId]
+  );
 
   useEffect(() => {
     rangesSV.value = ranges.map((r) => ({
@@ -149,17 +185,6 @@ export function ClockdayScreen() {
       ? { id: sel.id, startMin: sel.startMin, endMin: sel.endMin }
       : null;
   }, [ranges, planner.selectedRangeId, rangesSV, selectedSV]);
-
-  useEffect(() => {
-    stickersSV.value = stickers.map((s) => {
-      const rad = (s.angleDeg * Math.PI) / 180;
-      return {
-        id: s.id,
-        x: CX + Math.cos(rad) * s.radius,
-        y: CY + Math.sin(rad) * s.radius,
-      };
-    });
-  }, [stickers, stickersSV]);
 
   useKeyboardHandler(
     {
@@ -175,83 +200,133 @@ export function ClockdayScreen() {
     []
   );
 
+  // ---- Commit / discard ----
+
+  const closeEditor = useCallback(() => {
+    Keyboard.dismiss();
+    setEditingId(null);
+    setDraftRange(null);
+    setTitle("");
+    draftActive.value = 0;
+    planner.selectRange(null);
+  }, [draftActive, planner]);
+
+  /**
+   * Commit whatever the label bar currently holds, because the touch has moved
+   * on to another range. Reads through refs — see the note on `titleRef`. The
+   * keyboard is left alone: whether it should go depends on what the caller
+   * opens next.
+   */
+  const commitOpen = useCallback(() => {
+    const openId = editingIdRef.current;
+    const draft = draftRangeRef.current;
+    if (!openId && !draft) return;
+
+    const name = titleRef.current.trim();
+    if (openId) {
+      planner.updateRange(openId, { title: name });
+    } else if (draft) {
+      planner.addRange({
+        id: `${planner.selectedDay}-${Date.now()}`,
+        startMin: draft.startMin,
+        endMin: draft.endMin,
+        title: name,
+        markerId: draft.markerId,
+      });
+    }
+    setEditingId(null);
+    setDraftRange(null);
+    setTitle("");
+    draftActive.value = 0;
+  }, [planner, draftActive]);
+
   // ---- JS-thread callbacks invoked from the gesture ----
 
   const tick = useCallback(() => {
     if (!reduceMotion) Haptics.selectionAsync();
   }, [reduceMotion]);
 
+  /**
+   * A tap on a band. One tap selects — handles out, pens live, no keyboard.
+   * Two taps on the same band inside DOUBLE_TAP_MS open the name.
+   *
+   * Invariants:
+   *  - `at` is a UI-thread `performance.now()`, so the window measures
+   *    finger-lift to finger-lift and a stalled JS thread cannot fake a pair.
+   *  - a match consumes the pair, so a triple tap reads select / edit / select.
+   *  - every touch that ends *without* a tap resets the pair (see `onCreated`,
+   *    `onResized`, `onDeselect`) — otherwise "tap, drag a handle, tap" reads
+   *    as a double tap.
+   */
   const onPickRange = useCallback(
-    (id: string) => {
+    (id: string, at: number) => {
+      // Tapping away from an open name commits it rather than dropping it.
+      const closed =
+        editingIdRef.current !== id &&
+        (editingIdRef.current !== null || draftRangeRef.current !== null);
+      if (closed) commitOpen();
+
+      const prev = lastTapRef.current;
+      const isDouble = prev.id === id && at - prev.at < DOUBLE_TAP_MS;
+      lastTapRef.current = isDouble ? { id: "", at: 0 } : { id, at };
+
       planner.selectRange(id);
-      const r = planner.day.ranges.find((x) => x.id === id);
-      if (r) {
-        setTitle(r.title);
-        setPending({
-          id: r.id,
-          startMin: r.startMin,
-          endMin: r.endMin,
-          markerId: r.markerId,
-        });
+
+      if (isDouble) {
+        const r = planner.day.ranges.find((x) => x.id === id);
+        if (r) {
+          setTitle(r.title);
+          setEditingId(id);
+        }
+      } else if (closed) {
+        // Selection alone never shows a keyboard.
+        Keyboard.dismiss();
       }
     },
-    [planner]
+    [planner, commitOpen]
   );
 
   const onCreated = useCallback(
     (startMin: number, endMin: number) => {
+      lastTapRef.current = { id: "", at: 0 };
+      commitOpen();
       setTitle("");
-      setPending({ startMin, endMin, markerId: planner.markerId });
+      setDraftRange({ startMin, endMin, markerId: planner.markerId });
     },
-    [planner.markerId]
+    [planner.markerId, commitOpen]
   );
 
   const onResized = useCallback(
     (id: string, startMin: number, endMin: number) => {
+      lastTapRef.current = { id: "", at: 0 };
       planner.updateRange(id, { startMin, endMin });
-      setPending((p) => (p && p.id === id ? { ...p, startMin, endMin } : p));
       setResizing(false);
     },
     [planner]
   );
 
-  const onStickerMoved = useCallback(
-    (id: string, angleDeg: number, radius: number) => {
-      planner.moveSticker(id, angleDeg, radius);
-    },
-    [planner]
-  );
-
-  // Picking a colour retints whatever is being edited straight away, and
-  // becomes the default for the next range drawn.
+  // Picking a colour retints whatever is selected — the reducer does that for a
+  // committed range — and becomes the default for the next range drawn.
   const pickMarker = useCallback(
     (markerId: MarkerId) => {
       planner.setMarker(markerId);
-      setPending((p) => (p ? { ...p, markerId } : p));
+      setDraftRange((d) => (d ? { ...d, markerId } : d));
     },
     [planner]
   );
 
   const onDeselect = useCallback(() => {
-    if (pending?.id) {
-      planner.selectRange(null);
-      setPending(null);
+    lastTapRef.current = { id: "", at: 0 };
+    // A tap on the face while a freshly drawn range is being named must not
+    // throw it away — that is still the only protection an uncommitted range
+    // has.
+    if (draftRangeRef.current) return;
+    if (editingIdRef.current) {
+      closeEditor();
+      return;
     }
-  }, [pending, planner]);
-
-  const placeSticker = useCallback(
-    (angleDeg: number, radius: number) => {
-      planner.addSticker({
-        id: `${planner.selectedDay}-h-${Date.now()}`,
-        kind: "heart",
-        angleDeg,
-        radius,
-      });
-      setStickerArmed(false);
-      if (!reduceMotion) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    },
-    [planner, reduceMotion]
-  );
+    if (planner.selectedRangeId) planner.selectRange(null);
+  }, [planner, closeEditor]);
 
   // ---- The single pan ----
   // One detector for the whole dial: stacking a Pan per arc is what makes
@@ -266,19 +341,8 @@ export function ClockdayScreen() {
           "worklet";
           mode.value = IDLE;
           lastTickMin.value = -1;
-
-          // 1. A sticker under the finger wins.
-          const sticks = stickersSV.value;
-          for (let i = 0; i < sticks.length; i += 1) {
-            const dx = e.x - sticks[i].x;
-            const dy = e.y - sticks[i].y;
-            if (Math.sqrt(dx * dx + dy * dy) < 24) {
-              mode.value = MOVE_STICKER;
-              stickerIdx.value = i;
-              dragId.value = sticks[i].id;
-              return;
-            }
-          }
+          beginX.value = e.x;
+          beginY.value = e.y;
 
           const hit = hitTrack(e.x, e.y);
           if (!hit) {
@@ -286,39 +350,65 @@ export function ClockdayScreen() {
             return;
           }
 
-          // 2. An end handle of the selected range.
+          // Which arc is under the finger. Resolved before the handle test,
+          // because a press on a handle needs to know what a *tap* would pick.
+          const list = rangesSV.value;
+          let arcId: string | null = null;
+          for (let i = 0; i < list.length; i += 1) {
+            if (rangeContains(list[i].startMin, list[i].endMin, hit.min)) {
+              arcId = list[i].id;
+              break;
+            }
+          }
+
           const sel = selectedSV.value;
+
+          // A short range's label is wider than its arc, so part of what you
+          // can see sits outside the range in minutes. Rescue those taps — but
+          // only for the selected range, so this can never steal a tap that
+          // would otherwise draw in an empty gap.
+          if (
+            arcId === null &&
+            sel &&
+            rangeNear(
+              sel.startMin,
+              sel.endMin,
+              hit.min,
+              TAP_PAD_PX * minutesPerPx(hit.ring)
+            )
+          ) {
+            arcId = sel.id;
+          }
+
+          // 1. An end handle of the selected range — provisionally. Whether
+          //    this is a resize or a tap is decided by movement in onUpdate,
+          //    never here: on a short range every point of the arc is inside a
+          //    handle's grab radius, so committing to a resize now would make
+          //    a second tap impossible to observe.
           if (sel) {
             const dStart = distToMinute(e.x, e.y, sel.startMin);
             const dEnd = distToMinute(e.x, e.y, sel.endMin);
             if (dStart < GRAB_R || dEnd < GRAB_R) {
-              mode.value = dStart <= dEnd ? RESIZE_START : RESIZE_END;
+              mode.value = MAYBE_RESIZE;
+              resizeSide.value = dStart <= dEnd ? RESIZE_START : RESIZE_END;
               dragId.value = sel.id;
+              tapId.value = arcId === null ? sel.id : arcId;
               baseStart.value = sel.startMin;
               baseSweep.value = sweepMin(sel.startMin, sel.endMin);
-              draftStartMin.value = sel.startMin;
-              draftSweepMin.value = baseSweep.value;
-              draftActive.value = 1;
               accumDeg.value = 0;
               lastAngle.value = angleAtPoint(e.x, e.y);
-              ringActive.value = withTiming(1, QUICK);
-              readoutOn.value = withTiming(1, QUICK);
-              scheduleOnRN(setResizing, true);
               return;
             }
           }
 
-          // 3. An existing arc -> select it (acted on in onFinalize).
-          const list = rangesSV.value;
-          for (let i = 0; i < list.length; i += 1) {
-            if (rangeContains(list[i].startMin, list[i].endMin, hit.min)) {
-              mode.value = SELECT;
-              dragId.value = list[i].id;
-              return;
-            }
+          // 2. An existing arc -> select it (acted on in onFinalize).
+          if (arcId !== null) {
+            mode.value = SELECT;
+            dragId.value = arcId;
+            return;
           }
 
-          // 4. Empty track -> start drawing.
+          // 3. Empty track -> start drawing.
           mode.value = CREATE;
           dragId.value = null;
           const anchor = snapMin(hit.min);
@@ -337,28 +427,23 @@ export function ClockdayScreen() {
           "worklet";
           if (mode.value === IDLE) return;
 
-          if (mode.value === MOVE_STICKER) {
-            const dx = e.x - CX;
-            const dy = e.y - CY;
-            const r = Math.min(
-              R_PM + 34,
-              Math.max(R_AM - 34, Math.sqrt(dx * dx + dy * dy))
-            );
-            const deg = (Math.atan2(dy, dx) * 180) / Math.PI;
-            const i = stickerIdx.value;
-            if (i >= 0) {
-              const next = stickersSV.value.slice();
-              const rad = (deg * Math.PI) / 180;
-              next[i] = {
-                ...next[i],
-                x: CX + Math.cos(rad) * r,
-                y: CY + Math.sin(rad) * r,
-              };
-              stickersSV.value = next;
-            }
-            baseStart.value = deg;
-            baseSweep.value = r;
-            return;
+          if (mode.value === MAYBE_RESIZE) {
+            const dx = e.x - beginX.value;
+            const dy = e.y - beginY.value;
+            if (dx * dx + dy * dy < TAP_SLOP * TAP_SLOP) return; // still a tap
+            // Promote, and arm everything onBegin deliberately left alone.
+            mode.value = resizeSide.value;
+            draftStartMin.value = baseStart.value;
+            draftSweepMin.value = baseSweep.value;
+            draftActive.value = 1;
+            accumDeg.value = 0;
+            // Re-baseline where the slop broke rather than where the finger
+            // landed, so the handle trails by 8px instead of jumping 8 minutes.
+            lastAngle.value = angleAtPoint(e.x, e.y);
+            ringActive.value = withTiming(1, QUICK);
+            readoutOn.value = withTiming(1, QUICK);
+            scheduleOnRN(setResizing, true);
+            // ...and fall through into the angle math on this same frame.
           }
 
           // Unwrap the angle rather than re-reading the radius, so continuing
@@ -405,19 +490,19 @@ export function ClockdayScreen() {
           if (m === IDLE) return;
           ringActive.value = withTiming(0, QUICK);
 
+          // Never promoted, so the finger never travelled: it was a tap.
+          if (m === MAYBE_RESIZE) {
+            const id = tapId.value;
+            if (id) scheduleOnRN(onPickRange, id, performance.now());
+            return;
+          }
           if (m === SELECT) {
             const id = dragId.value;
-            if (id) scheduleOnRN(onPickRange, id);
+            if (id) scheduleOnRN(onPickRange, id, performance.now());
             return;
           }
           if (m === DESELECT) {
             scheduleOnRN(onDeselect);
-            return;
-          }
-          if (m === MOVE_STICKER) {
-            const id = dragId.value;
-            if (id)
-              scheduleOnRN(onStickerMoved, id, baseStart.value, baseSweep.value);
             return;
           }
 
@@ -437,6 +522,8 @@ export function ClockdayScreen() {
       accumDeg,
       baseStart,
       baseSweep,
+      beginX,
+      beginY,
       dragId,
       draftActive,
       draftStartMin,
@@ -448,86 +535,62 @@ export function ClockdayScreen() {
       onDeselect,
       onPickRange,
       onResized,
-      onStickerMoved,
       rangesSV,
       readout,
       readoutOn,
+      resizeSide,
       ringActive,
       selectedSV,
-      stickerIdx,
-      stickersSV,
+      tapId,
       tick,
     ]
   );
 
-  const tap = useMemo(
-    () =>
-      Gesture.Tap().onEnd((e) => {
-        "worklet";
-        if (!stickerArmed) return;
-        const dx = e.x - CX;
-        const dy = e.y - CY;
-        const r = Math.sqrt(dx * dx + dy * dy);
-        const deg = (Math.atan2(dy, dx) * 180) / Math.PI;
-        scheduleOnRN(placeSticker, deg, Math.min(R_PM + 34, Math.max(60, r)));
-      }),
-    [stickerArmed, placeSticker]
-  );
-
-  const gesture = useMemo(
-    () => (stickerArmed ? Gesture.Exclusive(tap, pan) : pan),
-    [stickerArmed, tap, pan]
-  );
-
-  // ---- Commit / discard ----
-
-  const closePending = useCallback(() => {
-    Keyboard.dismiss();
-    setPending(null);
-    setTitle("");
-    draftActive.value = 0;
-    readoutOn.value = withTiming(0, QUICK);
-    planner.selectRange(null);
-  }, [draftActive, readoutOn, planner]);
-
   const confirm = useCallback(() => {
-    if (!pending) return;
     const name = title.trim();
-    if (pending.id) {
-      planner.updateRange(pending.id, {
+    if (editingId) {
+      // Geometry was already committed by onResized; writing it back from a
+      // snapshot taken when the name opened is the only way left to lose it.
+      planner.updateRange(editingId, { title: name });
+    } else if (draftRange) {
+      planner.addRange({
+        id: `${planner.selectedDay}-${Date.now()}`,
+        startMin: draftRange.startMin,
+        endMin: draftRange.endMin,
         title: name,
-        startMin: pending.startMin,
-        endMin: pending.endMin,
+        markerId: draftRange.markerId,
       });
     } else {
-      const range: RangeItem = {
-        id: `${planner.selectedDay}-${Date.now()}`,
-        startMin: pending.startMin,
-        endMin: pending.endMin,
-        title: name,
-        markerId: planner.markerId,
-      };
-      planner.addRange(range);
+      return;
     }
-    closePending();
-  }, [pending, title, planner, closePending]);
+    closeEditor();
+  }, [editingId, draftRange, title, planner, closeEditor]);
 
   const remove = useCallback(() => {
-    if (pending?.id) planner.deleteRange(pending.id);
-    closePending();
-  }, [pending, planner, closePending]);
+    if (editingId) planner.deleteRange(editingId);
+    closeEditor();
+  }, [editingId, planner, closeEditor]);
 
+  // The readout stands in for the date whenever there is a range in hand —
+  // drawn, selected, or being resized — and steps aside when there isn't.
   useEffect(() => {
-    if (!pending) return;
-    readout.value = formatRange(pending.startMin, pending.endMin);
+    const src = draftRange ?? selectedRange;
+    if (!src) {
+      readoutOn.value = withTiming(0, QUICK);
+      return;
+    }
+    readout.value = formatRange(src.startMin, src.endMin);
     readoutOn.value = withTiming(1, QUICK);
-    // A committed range is already drawn (with its label) by RangeArcs, so the
-    // draft only stands in for one that does not exist yet.
-    if (pending.id) return;
-    draftStartMin.value = pending.startMin;
-    draftSweepMin.value = sweepMin(pending.startMin, pending.endMin);
+  }, [draftRange, selectedRange, readout, readoutOn]);
+
+  // A committed range is already drawn (with its label) by RangeArcs, so the
+  // draft only ever stands in for one that does not exist yet.
+  useEffect(() => {
+    if (!draftRange) return;
+    draftStartMin.value = draftRange.startMin;
+    draftSweepMin.value = sweepMin(draftRange.startMin, draftRange.endMin);
     draftActive.value = 1;
-  }, [pending, draftStartMin, draftSweepMin, draftActive, readout, readoutOn]);
+  }, [draftRange, draftStartMin, draftSweepMin, draftActive]);
 
   // ---- Layout ----
 
@@ -542,9 +605,15 @@ export function ClockdayScreen() {
     };
   });
 
-  const naming = pending !== null;
-  // Only suppressed mid-resize, where the draft shows the new geometry.
-  const hiddenId = resizing ? pending?.id ?? null : null;
+  const naming = draftRange !== null || editingId !== null;
+  const activeMarkerId =
+    draftRange?.markerId ?? selectedRange?.markerId ?? planner.markerId;
+  const activeMarker = MARKER_BY_ID[activeMarkerId];
+  // Sourced from the selection, not from the editor: a resize can only ever
+  // target the selected range, and single-tap-select leaves no editor open to
+  // read an id from. Without this the committed arc renders under the live
+  // draft for the whole drag.
+  const hiddenId = resizing ? planner.selectedRangeId : null;
 
   return (
     <View style={[styles.screen, { backgroundColor: theme.bg }]}>
@@ -555,7 +624,10 @@ export function ClockdayScreen() {
           dayKey={planner.selectedDay}
           expanded={calendarOpen}
           onToggleCalendar={() => setCalendarOpen((v) => !v)}
-          onMore={() => setCalendarOpen(false)}
+          onMore={() => {
+            setCalendarOpen(false);
+            sheetRef.current?.present();
+          }}
           readout={readout}
           readoutOn={readoutOn}
         />
@@ -563,7 +635,7 @@ export function ClockdayScreen() {
 
       <View style={styles.stage}>
         <Animated.View style={clockStyle}>
-          <GestureDetector gesture={gesture}>
+          <GestureDetector gesture={pan}>
             <View style={styles.canvasWrap} collapsable={false}>
               <ClockCanvas
                 theme={theme}
@@ -577,15 +649,10 @@ export function ClockdayScreen() {
                   startMin: draftStartMin,
                   sweepMin: draftSweepMin,
                 }}
-                draftFill={
-                  (pending && MARKER_BY_ID[pending.markerId].fill) ?? marker.fill
-                }
-                draftEdge={
-                  (pending && MARKER_BY_ID[pending.markerId].edge) ?? marker.edge
-                }
+                draftFill={activeMarker.fill}
+                draftEdge={activeMarker.edge}
                 ringActive={ringActive}
               />
-              <StickerLayer stickers={stickers} />
             </View>
           </GestureDetector>
         </Animated.View>
@@ -595,12 +662,7 @@ export function ClockdayScreen() {
           way to recolour it — but folds away once the keyboard takes the room. */}
       {!kbVisible && (
         <View style={{ paddingBottom: naming ? 0 : insets.bottom + 4 }}>
-          <MarkerTray
-            selected={naming ? pending!.markerId : planner.markerId}
-            onSelect={pickMarker}
-            stickerArmed={stickerArmed}
-            onToggleSticker={() => setStickerArmed((v) => !v)}
-          />
+          <MarkerTray selected={activeMarkerId} onSelect={pickMarker} />
         </View>
       )}
 
@@ -624,6 +686,8 @@ export function ClockdayScreen() {
           now={now}
         />
       )}
+
+      <AppearanceSheet sheetRef={sheetRef} />
     </View>
   );
 }

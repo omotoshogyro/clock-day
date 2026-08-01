@@ -1,37 +1,16 @@
-import { Pressable, StyleSheet, Text, View } from "react-native";
-import Animated, {
-  useAnimatedStyle,
-  useReducedMotion,
-  withSpring,
-} from "react-native-reanimated";
+import { StyleSheet, View } from "react-native";
 
-import { MARKERS, SNAPPY, type MarkerId } from "../constants";
+import { MARKERS, type MarkerId } from "../constants";
 import { useTheme } from "../theme";
 import { MarkerPen } from "./marker-pen";
 
 type Props = {
   selected: MarkerId;
   onSelect: (id: MarkerId) => void;
-  stickerArmed: boolean;
-  onToggleSticker: () => void;
 };
 
-export function MarkerTray({
-  selected,
-  onSelect,
-  stickerArmed,
-  onToggleSticker,
-}: Props) {
+export function MarkerTray({ selected, onSelect }: Props) {
   const theme = useTheme();
-  const reduceMotion = useReducedMotion();
-  const spring = reduceMotion ? { duration: 0 } : SNAPPY;
-
-  const heartStyle = useAnimatedStyle(() => ({
-    transform: [
-      { translateY: withSpring(stickerArmed ? -12 : 0, spring) },
-      { scale: withSpring(stickerArmed ? 1.15 : 1, spring) },
-    ],
-  }));
 
   return (
     <View style={[styles.tray, { borderTopColor: theme.hairline }]}>
@@ -43,19 +22,6 @@ export function MarkerTray({
           onPress={() => onSelect(m.id)}
         />
       ))}
-
-      <Pressable
-        onPress={onToggleSticker}
-        hitSlop={8}
-        accessibilityRole="button"
-        accessibilityState={{ selected: stickerArmed }}
-        accessibilityLabel="Heart sticker"
-        style={styles.heartHit}
-      >
-        <Animated.View style={heartStyle}>
-          <Text style={styles.heart}>❤️</Text>
-        </Animated.View>
-      </Pressable>
     </View>
   );
 }
@@ -69,6 +35,4 @@ const styles = StyleSheet.create({
     paddingTop: 10,
     borderTopWidth: StyleSheet.hairlineWidth,
   },
-  heartHit: { height: 80, justifyContent: "flex-end", paddingHorizontal: 8 },
-  heart: { fontSize: 30 },
 });

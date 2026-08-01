@@ -39,7 +39,20 @@ export const R_FACE = R_AM - BAND / 2 - FACE_CLEAR; // clock face radius
 export const CX = CANVAS / 2;
 export const CY = CANVAS / 2;
 
-export const DOT_R = 1.7; // dotted-track dot radius
+// Dots are hand-scattered rather than printed: each one gets its own radius
+// from a per-index hash, so the tracks read as placed by hand.
+//
+// DOT_R_MAX is a real ceiling, not taste. Neighbours on the AM track are
+// 2π·R_AM/96 ≈ 7.7pt apart, so two adjacent dots at 3.83 would touch and the
+// ring would read as a dashed line. The gamma biases the distribution toward
+// small dots — E[u^1.6] ≈ 0.385 puts the mean radius at ~1.8, so the tracks
+// carry about as much ink as the flat 1.7 they replaced.
+export const DOT_R_MIN = 1.1;
+export const DOT_R_MAX = 3.0;
+export const DOT_R_GAMMA = 1.6;
+/** Distinct seeds so the two tracks share no visible size pattern. */
+export const DOT_SEED_AM = 0x9e3779b9;
+export const DOT_SEED_PM = 0x85ebca6b;
 export const DOTS_PER_RING = 96; // one dot every 7.5 minutes
 export const GRAB_R = 26; // end-handle grab radius
 export const HANDLE_R = 13; // end-handle visual radius

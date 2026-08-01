@@ -68,6 +68,33 @@ export function rangeContains(
   return sweepMin(startMin, min) <= total;
 }
 
+/** How many minutes of track one pixel of arc covers, per ring. */
+export function minutesPerPx(ring: Ring): number {
+  "worklet";
+  return MIN_PER_TURN / (2 * Math.PI * radiusOf(ring));
+}
+
+/**
+ * `rangeContains` with slack on both ends.
+ *
+ * A short range's *label* is wider than its arc: a 20-minute range on the AM
+ * track is ~20px long, while the pill drawn over it is ~50px. Half the thing
+ * you can see is therefore outside the range in minute terms, and a tap there
+ * would fall through to "empty track". Padding the test by a few pixels' worth
+ * of minutes makes the visible shape the hit target.
+ */
+export function rangeNear(
+  startMin: number,
+  endMin: number,
+  min: number,
+  padMin: number
+): boolean {
+  "worklet";
+  const total = sweepMin(startMin, endMin);
+  if (total <= 0) return false;
+  return sweepMin(normMin(startMin - padMin), min) <= total + padMin * 2;
+}
+
 // ---- Paths -------------------------------------------------------------
 
 const DEG = 180 / Math.PI;
