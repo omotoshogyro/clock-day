@@ -1,4 +1,4 @@
-import { Circle, Group, Skia } from "@shopify/react-native-skia";
+import { Circle, Group, RoundedRect, Skia, Text } from "@shopify/react-native-skia";
 import { Path } from "@shopify/react-native-skia";
 import { useDerivedValue, type SharedValue } from "react-native-reanimated";
 
@@ -8,12 +8,14 @@ import {
   CX,
   CY,
   HANDLE_R,
+  PILL_H,
   R_AM,
   R_PM,
 } from "../constants";
 import { sectorPath } from "../geometry";
 import { MIN_PER_DAY, MIN_PER_TURN } from "../time";
 import type { Theme } from "../theme";
+import type { DialFonts } from "./fonts";
 
 /**
  * Declared above its callers deliberately — the worklets transform resolves a
@@ -67,12 +69,28 @@ export type Draft = {
   startMin: SharedValue<number>;
   /** Forward sweep in minutes, always >= 0. */
   sweepMin: SharedValue<number>;
+  /**
+   * 0 unless the draft stands in for a range that already has a name — i.e. a
+   * move. A range being *drawn* has no title to show yet.
+   */
+  labelOn: SharedValue<number>;
+};
+
+/** A title pre-measured on the JS thread; offsets are relative to the midpoint. */
+export type DraftLabel = {
+  text: string;
+  w: number;
+  tx: number;
+  ty: number;
 };
 
 type Props = {
   draft: Draft;
   fill: string;
   edge: string;
+  label: DraftLabel | null;
+  ink: string;
+  fonts: DialFonts;
   theme: Theme;
 };
 
@@ -81,7 +99,15 @@ type Props = {
  * a drag never touches React — the path is rebuilt on the UI thread each frame
  * and the committed arcs underneath stay untouched.
  */
-export function DraftArc({ draft, fill, edge, theme }: Props) {
+export function DraftArc({
+  draft,
+  fill,
+  edge,
+  label,
+  ink,
+  fonts,
+  theme,
+}: Props) {
   const path = useDerivedValue(() => {
     "worklet";
     if (draft.active.value === 0) return Skia.Path.Make();
@@ -119,6 +145,24 @@ export function DraftArc({ draft, fill, edge, theme }: Props) {
   const endY = useDerivedValue(() => endPos.value.y);
   const opacity = useDerivedValue(() => draft.active.value);
 
+  // Always the pill form, even for a range whose committed label is curved
+  // text: rebuilding a text path every frame on the UI thread is not worth the
+  // one frame it saves on release.
+  const midPos = useDerivedValue(() => {
+    "worklet";
+    return dialPoint(draft.startMin.value + draft.sweepMin.value / 2);
+  });
+  const labelW = label?.w ?? 0;
+  const labelTx = label?.tx ?? 0;
+  const labelTy = label?.ty ?? 0;
+  const pillX = useDerivedValue(() => midPos.value.x - labelW / 2);
+  const pillY = useDerivedValue(() => midPos.value.y - PILL_H / 2);
+  const textX = useDerivedValue(() => midPos.value.x + labelTx);
+  const textY = useDerivedValue(() => midPos.value.y + labelTy);
+  const labelOpacity = useDerivedValue(
+    () => draft.active.value * draft.labelOn.value
+  );
+
   return (
     <Group opacity={opacity}>
       <Path path={edgePath} color={edge} />
@@ -127,6 +171,19 @@ export function DraftArc({ draft, fill, edge, theme }: Props) {
       <Circle cx={endX} cy={endY} r={HANDLE_R} color={edge} />
       <Circle cx={startX} cy={startY} r={HANDLE_R - 3.5} color={theme.faceBg} />
       <Circle cx={endX} cy={endY} r={HANDLE_R - 3.5} color={theme.faceBg} />
+      {label && (
+        <Group opacity={labelOpacity}>
+          <RoundedRect
+            x={pillX}
+            y={pillY}
+            width={labelW}
+            height={PILL_H}
+            r={PILL_H / 2}
+            color={fill}
+          />
+          <Text x={textX} y={textY} text={label.text} font={fonts.mini} color={ink} />
+        </Group>
+      )}
     </Group>
   );
 }

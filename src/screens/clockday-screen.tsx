@@ -2,7 +2,12 @@ import type { BottomSheetModal } from "@gorhom/bottom-sheet";
 import * as Haptics from "expo-haptics";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Keyboard, StyleSheet, View } from "react-native";
+import {
+  Keyboard,
+  StyleSheet,
+  View,
+  type LayoutChangeEvent,
+} from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { useKeyboardHandler } from "react-native-keyboard-controller";
 import Animated, {
@@ -20,6 +25,7 @@ import { useNow } from "../clock/use-now";
 import {
   CANVAS,
   GRAB_R,
+  SCREEN_W,
   KB_LIFT_FACTOR,
   KB_LIFT_MAX,
   KB_SCALE_MIN,
@@ -62,6 +68,10 @@ const SELECT = 4;
 const DESELECT = 5;
 /** Pressed a handle — resize or tap is not decided yet. See onUpdate. */
 const MAYBE_RESIZE = 6;
+/** Dragging the whole selected range; the sweep is fixed, the start follows. */
+const MOVE = 7;
+/** Pressed the body of the selected range — move or tap is not decided yet. */
+const MAYBE_MOVE = 8;
 
 const MIN_SWEEP = SNAP; // a range is never shorter than one snap step
 
@@ -97,8 +107,8 @@ export function ClockdayScreen() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [kbVisible, setKbVisible] = useState(false);
-  /** True only while an end handle is under the finger. */
-  const [resizing, setResizing] = useState(false);
+  /** Id of the range under the finger, drawn by the draft instead of RangeArcs. */
+  const [liveDragId, setLiveDragId] = useState<string | null>(null);
 
   // Gesture callbacks are dependencies of the Pan, and the Pan must not be
   // rebuilt mid-session — a re-attached handler is what makes pans
@@ -139,6 +149,8 @@ export function ClockdayScreen() {
   const draftActive = useSharedValue(0);
   const draftStartMin = useSharedValue(0);
   const draftSweepMin = useSharedValue(0);
+  /** 1 only while a move is in flight — a draft being *drawn* has no name yet. */
+  const draftLabelOn = useSharedValue(0);
   const ringActive = useSharedValue(0);
   const readout = useSharedValue("");
   const readoutOn = useSharedValue(0);
@@ -152,6 +164,13 @@ export function ClockdayScreen() {
   const dragId = useSharedValue<string | null>(null);
   const beginX = useSharedValue(0);
   const beginY = useSharedValue(0);
+  // Where the canvas sits inside the touch layer. The layer fills the stage so
+  // that a tap in the blank space around the dial still reaches the pan, but
+  // every hit test below is written in canvas coordinates — these close the gap.
+  const offX = useSharedValue(Math.max(0, (SCREEN_W - CANVAS) / 2));
+  const offY = useSharedValue(0);
+  /** 0 until onLayout has run, so a pre-layout touch cannot be misplaced. */
+  const laidOut = useSharedValue(0);
   /** Which end MAYBE_RESIZE promotes to. */
   const resizeSide = useSharedValue(RESIZE_START);
   /** What a MAYBE_RESIZE selects if it turns out to be a tap. */
@@ -166,6 +185,11 @@ export function ClockdayScreen() {
     startMin: number;
     endMin: number;
   } | null>(null);
+  /**
+   * True while a freshly drawn range waits for its name. The draft shared values
+   * are holding *that* range, so nothing else may grab them until it commits.
+   */
+  const draftPendingSV = useSharedValue(false);
 
   const { ranges } = planner.day;
 
@@ -186,6 +210,10 @@ export function ClockdayScreen() {
       : null;
   }, [ranges, planner.selectedRangeId, rangesSV, selectedSV]);
 
+  useEffect(() => {
+    draftPendingSV.value = draftRange !== null;
+  }, [draftRange, draftPendingSV]);
+
   useKeyboardHandler(
     {
       onMove: (e) => {
@@ -198,6 +226,21 @@ export function ClockdayScreen() {
       },
     },
     []
+  );
+
+  /**
+   * The touch layer's untransformed box. `clockStyle`'s lift and scale must not
+   * appear here: RNGH reports pre-transform coordinates, so the offset has to be
+   * pre-transform too.
+   */
+  const onStageLayout = useCallback(
+    (e: LayoutChangeEvent) => {
+      const { width, height } = e.nativeEvent.layout;
+      offX.value = (width - CANVAS) / 2;
+      offY.value = (height - CANVAS) / 2;
+      laidOut.value = 1;
+    },
+    [offX, offY, laidOut]
   );
 
   // ---- Commit / discard ----
@@ -255,7 +298,7 @@ export function ClockdayScreen() {
    *    finger-lift to finger-lift and a stalled JS thread cannot fake a pair.
    *  - a match consumes the pair, so a triple tap reads select / edit / select.
    *  - every touch that ends *without* a tap resets the pair (see `onCreated`,
-   *    `onResized`, `onDeselect`) — otherwise "tap, drag a handle, tap" reads
+   *    `onDragCommit`, `onDeselect`) — otherwise "tap, drag, tap" would read
    *    as a double tap.
    */
   const onPickRange = useCallback(
@@ -296,11 +339,13 @@ export function ClockdayScreen() {
     [planner.markerId, commitOpen]
   );
 
-  const onResized = useCallback(
+  /** Commit new geometry after a resize or a move — the two differ only in how
+   *  the draft got where it is. */
+  const onDragCommit = useCallback(
     (id: string, startMin: number, endMin: number) => {
       lastTapRef.current = { id: "", at: 0 };
       planner.updateRange(id, { startMin, endMin });
-      setResizing(false);
+      setLiveDragId(null);
     },
     [planner]
   );
@@ -322,11 +367,14 @@ export function ClockdayScreen() {
     // has.
     if (draftRangeRef.current) return;
     if (editingIdRef.current) {
+      // Tapping away saves, exactly as tapping another range does. The blank
+      // area is most of the screen now; it must not quietly eat what you typed.
+      commitOpen();
       closeEditor();
       return;
     }
     if (planner.selectedRangeId) planner.selectRange(null);
-  }, [planner, closeEditor]);
+  }, [planner, closeEditor, commitOpen]);
 
   // ---- The single pan ----
   // One detector for the whole dial: stacking a Pan per arc is what makes
@@ -341,10 +389,21 @@ export function ClockdayScreen() {
           "worklet";
           mode.value = IDLE;
           lastTickMin.value = -1;
+          // Kept in raw layer space, unlike x/y below: these only ever feed the
+          // TAP_SLOP delta in onUpdate, and a delta that never leaves layer
+          // space cannot be faked by a re-measure between the two handlers.
           beginX.value = e.x;
           beginY.value = e.y;
 
-          const hit = hitTrack(e.x, e.y);
+          // e.x/e.y are local to the touch layer, which spans the whole stage.
+          // The dial's geometry is written in canvas coordinates (CX/CY), so one
+          // subtraction here keeps every hit test below in the space it expects.
+          const x = e.x - offX.value;
+          const y = e.y - offY.value;
+
+          // Before the first layout the offsets are unknown, so nothing can be
+          // hit — which resolves to DESELECT, the inert outcome.
+          const hit = laidOut.value ? hitTrack(x, y) : null;
           if (!hit) {
             mode.value = DESELECT;
             return;
@@ -380,35 +439,63 @@ export function ClockdayScreen() {
             arcId = sel.id;
           }
 
+          // The draft shared values belong to a range that is still being named,
+          // so neither a resize nor a move may borrow them. Fall through to a
+          // plain selection instead.
+          const busy = draftPendingSV.value;
+
           // 1. An end handle of the selected range — provisionally. Whether
           //    this is a resize or a tap is decided by movement in onUpdate,
           //    never here: on a short range every point of the arc is inside a
           //    handle's grab radius, so committing to a resize now would make
           //    a second tap impossible to observe.
-          if (sel) {
-            const dStart = distToMinute(e.x, e.y, sel.startMin);
-            const dEnd = distToMinute(e.x, e.y, sel.endMin);
-            if (dStart < GRAB_R || dEnd < GRAB_R) {
+          if (sel && !busy) {
+            const sweep = sweepMin(sel.startMin, sel.endMin);
+            const dStart = distToMinute(x, y, sel.startMin);
+            const dEnd = distToMinute(x, y, sel.endMin);
+            const dHandle = Math.min(dStart, dEnd);
+            // On a range shorter than two grab radii every point sits inside a
+            // handle, which would leave it unmovable. So split on whichever
+            // anchor is nearest rather than on the grab radius alone: the ends
+            // resize, the middle moves. On a long range the midpoint is far
+            // away and this reads exactly as it did before.
+            const dMid = distToMinute(x, y, normMin(sel.startMin + sweep / 2));
+            if (dHandle < GRAB_R && dHandle <= dMid) {
               mode.value = MAYBE_RESIZE;
               resizeSide.value = dStart <= dEnd ? RESIZE_START : RESIZE_END;
               dragId.value = sel.id;
               tapId.value = arcId === null ? sel.id : arcId;
               baseStart.value = sel.startMin;
-              baseSweep.value = sweepMin(sel.startMin, sel.endMin);
+              baseSweep.value = sweep;
               accumDeg.value = 0;
-              lastAngle.value = angleAtPoint(e.x, e.y);
+              lastAngle.value = angleAtPoint(x, y);
+              return;
+            }
+
+            // 2. The body of the selected range -> move the whole thing, on the
+            //    same provisional terms as a handle. Only the selected range,
+            //    because an unselected one draws no handles and no outline —
+            //    dragging it would reschedule something you never took hold of.
+            if (arcId === sel.id) {
+              mode.value = MAYBE_MOVE;
+              dragId.value = sel.id;
+              tapId.value = sel.id;
+              baseStart.value = sel.startMin;
+              baseSweep.value = sweep;
+              accumDeg.value = 0;
+              lastAngle.value = angleAtPoint(x, y);
               return;
             }
           }
 
-          // 2. An existing arc -> select it (acted on in onFinalize).
+          // 3. An existing arc -> select it (acted on in onFinalize).
           if (arcId !== null) {
             mode.value = SELECT;
             dragId.value = arcId;
             return;
           }
 
-          // 3. Empty track -> start drawing.
+          // 4. Empty track -> start drawing.
           mode.value = CREATE;
           dragId.value = null;
           const anchor = snapMin(hit.min);
@@ -418,42 +505,63 @@ export function ClockdayScreen() {
           draftSweepMin.value = 0;
           draftActive.value = 1;
           accumDeg.value = 0;
-          lastAngle.value = angleAtPoint(e.x, e.y);
+          lastAngle.value = angleAtPoint(x, y);
           readout.value = formatRange(anchor, anchor);
           readoutOn.value = withTiming(1, QUICK);
           ringActive.value = withTiming(1, QUICK);
         })
         .onUpdate((e) => {
           "worklet";
-          if (mode.value === IDLE) return;
+          // Same layer -> canvas shift as onBegin; see the note there.
+          const x = e.x - offX.value;
+          const y = e.y - offY.value;
 
-          if (mode.value === MAYBE_RESIZE) {
+          const pending = mode.value;
+          if (pending === MAYBE_RESIZE || pending === MAYBE_MOVE) {
+            // Raw layer space on both sides, matching beginX/beginY.
             const dx = e.x - beginX.value;
             const dy = e.y - beginY.value;
             if (dx * dx + dy * dy < TAP_SLOP * TAP_SLOP) return; // still a tap
             // Promote, and arm everything onBegin deliberately left alone.
-            mode.value = resizeSide.value;
+            mode.value = pending === MAYBE_MOVE ? MOVE : resizeSide.value;
             draftStartMin.value = baseStart.value;
             draftSweepMin.value = baseSweep.value;
             draftActive.value = 1;
             accumDeg.value = 0;
             // Re-baseline where the slop broke rather than where the finger
             // landed, so the handle trails by 8px instead of jumping 8 minutes.
-            lastAngle.value = angleAtPoint(e.x, e.y);
+            lastAngle.value = angleAtPoint(x, y);
             ringActive.value = withTiming(1, QUICK);
             readoutOn.value = withTiming(1, QUICK);
-            scheduleOnRN(setResizing, true);
+            // A move carries the range's name with it — that name is the only
+            // thing telling you which range you have hold of.
+            if (pending === MAYBE_MOVE) draftLabelOn.value = 1;
+            scheduleOnRN(setLiveDragId, dragId.value);
             // ...and fall through into the angle math on this same frame.
+          }
+
+          // Read the mode *after* the promotion above. Only these four drag the
+          // dial; SELECT and DESELECT have to stop here or they scrub the draft
+          // (and the header readout) off stale base values.
+          const m = mode.value;
+          if (m !== CREATE && m !== MOVE && m !== RESIZE_START && m !== RESIZE_END) {
+            return;
           }
 
           // Unwrap the angle rather than re-reading the radius, so continuing
           // clockwise past 12 rolls onto the next track instead of snapping.
-          const a = angleAtPoint(e.x, e.y);
+          const a = angleAtPoint(x, y);
           accumDeg.value += deltaDeg(a, lastAngle.value);
           lastAngle.value = a;
           const deltaMin = degToMin(accumDeg.value);
 
-          if (mode.value === RESIZE_START) {
+          if (m === MOVE) {
+            // Snap the travel, never the start: that holds the duration exactly
+            // and cannot nudge a start that was not on a snap boundary already.
+            const step = Math.round(deltaMin / SNAP) * SNAP;
+            draftStartMin.value = normMin(baseStart.value + step);
+            draftSweepMin.value = baseSweep.value;
+          } else if (m === RESIZE_START) {
             const rawSweep = baseSweep.value - deltaMin;
             const sweep = Math.min(
               MIN_PER_DAY - SNAP,
@@ -463,9 +571,8 @@ export function ClockdayScreen() {
             draftStartMin.value = normMin(end - sweep);
             draftSweepMin.value = sweep;
           } else {
-            const rawSweep =
-              (mode.value === CREATE ? 0 : baseSweep.value) + deltaMin;
-            const floor = mode.value === CREATE ? 0 : MIN_SWEEP;
+            const rawSweep = (m === CREATE ? 0 : baseSweep.value) + deltaMin;
+            const floor = m === CREATE ? 0 : MIN_SWEEP;
             draftSweepMin.value = Math.min(
               MIN_PER_DAY - SNAP,
               Math.max(floor, Math.round(rawSweep / SNAP) * SNAP)
@@ -487,11 +594,12 @@ export function ClockdayScreen() {
           "worklet";
           const m = mode.value;
           mode.value = IDLE;
+          draftLabelOn.value = 0;
           if (m === IDLE) return;
           ringActive.value = withTiming(0, QUICK);
 
           // Never promoted, so the finger never travelled: it was a tap.
-          if (m === MAYBE_RESIZE) {
+          if (m === MAYBE_RESIZE || m === MAYBE_MOVE) {
             const id = tapId.value;
             if (id) scheduleOnRN(onPickRange, id, performance.now());
             return;
@@ -515,7 +623,7 @@ export function ClockdayScreen() {
           } else {
             draftActive.value = 0;
             const id = dragId.value;
-            if (id) scheduleOnRN(onResized, id, start, end);
+            if (id) scheduleOnRN(onDragCommit, id, start, end);
           }
         }),
     [
@@ -526,15 +634,20 @@ export function ClockdayScreen() {
       beginY,
       dragId,
       draftActive,
+      draftLabelOn,
+      draftPendingSV,
       draftStartMin,
       draftSweepMin,
+      laidOut,
       lastAngle,
       lastTickMin,
       mode,
+      offX,
+      offY,
       onCreated,
       onDeselect,
+      onDragCommit,
       onPickRange,
-      onResized,
       rangesSV,
       readout,
       readoutOn,
@@ -549,7 +662,7 @@ export function ClockdayScreen() {
   const confirm = useCallback(() => {
     const name = title.trim();
     if (editingId) {
-      // Geometry was already committed by onResized; writing it back from a
+      // Geometry was already committed by onDragCommit; writing it back from a
       // snapshot taken when the name opened is the only way left to lose it.
       planner.updateRange(editingId, { title: name });
     } else if (draftRange) {
@@ -609,11 +722,23 @@ export function ClockdayScreen() {
   const activeMarkerId =
     draftRange?.markerId ?? selectedRange?.markerId ?? planner.markerId;
   const activeMarker = MARKER_BY_ID[activeMarkerId];
-  // Sourced from the selection, not from the editor: a resize can only ever
-  // target the selected range, and single-tap-select leaves no editor open to
-  // read an id from. Without this the committed arc renders under the live
-  // draft for the whole drag.
-  const hiddenId = resizing ? planner.selectedRangeId : null;
+  // Without this the committed arc renders under the live draft for the whole
+  // drag.
+  const hiddenId = liveDragId;
+
+  // Measured once per title rather than per frame: the pill only has to follow
+  // the range's midpoint, and that is pure geometry the UI thread can do.
+  const draftLabel = useMemo(() => {
+    const text = selectedRange?.title;
+    if (!text) return null;
+    const box = fonts.mini.measureText(text);
+    return {
+      text,
+      w: box.width + 16,
+      tx: -box.width / 2 - box.x,
+      ty: -(box.y + box.height / 2),
+    };
+  }, [selectedRange?.title, fonts]);
 
   return (
     <View style={[styles.screen, { backgroundColor: theme.bg }]}>
@@ -634,9 +759,13 @@ export function ClockdayScreen() {
       </View>
 
       <View style={styles.stage}>
-        <Animated.View style={clockStyle}>
+        <Animated.View style={[styles.clockLayer, clockStyle]}>
           <GestureDetector gesture={pan}>
-            <View style={styles.canvasWrap} collapsable={false}>
+            <View
+              style={styles.canvasWrap}
+              collapsable={false}
+              onLayout={onStageLayout}
+            >
               <ClockCanvas
                 theme={theme}
                 fonts={fonts}
@@ -648,9 +777,12 @@ export function ClockdayScreen() {
                   active: draftActive,
                   startMin: draftStartMin,
                   sweepMin: draftSweepMin,
+                  labelOn: draftLabelOn,
                 }}
                 draftFill={activeMarker.fill}
                 draftEdge={activeMarker.edge}
+                draftLabel={draftLabel}
+                draftInk={activeMarker.labelInk}
                 ringActive={ringActive}
               />
             </View>
@@ -694,6 +826,13 @@ export function ClockdayScreen() {
 
 const styles = StyleSheet.create({
   screen: { flex: 1 },
-  stage: { flex: 1, alignItems: "center", justifyContent: "center" },
-  canvasWrap: { width: CANVAS, height: CANVAS },
+  // The stage centres nothing any more: its whole area is the touch layer, and
+  // the layer centres the canvas itself. `alignItems: "center"` here would
+  // shrink-wrap the flex:1 layer to zero width.
+  stage: { flex: 1 },
+  // Both of these must fill the stage, not just the innermost one — hit testing
+  // is clipped by every ancestor's bounds, so a wide wrapper inside a
+  // canvas-sized parent would render but receive nothing outside the square.
+  clockLayer: { flex: 1 },
+  canvasWrap: { flex: 1, alignItems: "center", justifyContent: "center" },
 });

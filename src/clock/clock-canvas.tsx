@@ -7,7 +7,7 @@ import type { Theme } from "../theme";
 import { ClockFace } from "./clock-face";
 import { ClockHands } from "./clock-hands";
 import { DotRings } from "./dot-rings";
-import { DraftArc, type Draft } from "./draft-arc";
+import { DraftArc, type Draft, type DraftLabel } from "./draft-arc";
 import { RangeArcs } from "./range-arcs";
 import type { DialFonts } from "./fonts";
 import type { Now } from "./use-now";
@@ -22,6 +22,8 @@ type Props = {
   draft: Draft;
   draftFill: string;
   draftEdge: string;
+  draftLabel: DraftLabel | null;
+  draftInk: string;
   ringActive: SharedValue<number>;
 };
 
@@ -40,6 +42,8 @@ export function ClockCanvas({
   draft,
   draftFill,
   draftEdge,
+  draftLabel,
+  draftInk,
   ringActive,
 }: Props) {
   return (
@@ -57,6 +61,9 @@ export function ClockCanvas({
           draft={draft}
           fill={draftFill}
           edge={draftEdge}
+          label={draftLabel}
+          ink={draftInk}
+          fonts={fonts}
           theme={theme}
         />
         <ClockFace theme={theme} fonts={fonts} />
