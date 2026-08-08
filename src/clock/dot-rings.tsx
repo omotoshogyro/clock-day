@@ -1,6 +1,6 @@
 import { Group, Path, Skia } from "@shopify/react-native-skia";
 import { useMemo } from "react";
-import { useDerivedValue } from "react-native-reanimated";
+import { interpolateColor, useDerivedValue } from "react-native-reanimated";
 import type { SharedValue } from "react-native-reanimated";
 
 import {
@@ -49,16 +49,22 @@ export function DotRings({ theme, active }: Props) {
   const am = useMemo(() => dotsPath(R_AM, DOT_SEED_AM), []);
   const pm = useMemo(() => dotsPath(R_PM, DOT_SEED_PM), []);
 
-  const opacity = useDerivedValue(() => 0.55 + active.value * 0.45);
   const origin = useMemo(() => ({ x: CX, y: CY }), []);
   const transform = useDerivedValue(() => [
     { scale: 1 + active.value * 0.012 },
   ]);
+  // The opacity ramp keeps the resting track exactly as light as it was; the
+  // colour shift is what the palettes' `dotActive` was always for, and it makes
+  // a live drag read more clearly than opacity alone could.
+  const opacity = useDerivedValue(() => 0.55 + active.value * 0.45);
+  const color = useDerivedValue(() =>
+    interpolateColor(active.value, [0, 1], [theme.dot, theme.dotActive])
+  );
 
   return (
     <Group opacity={opacity} origin={origin} transform={transform}>
-      <Path path={am} color={theme.dot} />
-      <Path path={pm} color={theme.dot} />
+      <Path path={am} color={color} />
+      <Path path={pm} color={color} />
     </Group>
   );
 }

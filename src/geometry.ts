@@ -68,6 +68,26 @@ export function rangeContains(
   return sweepMin(startMin, min) <= total;
 }
 
+/**
+ * Which band a touch lands on.
+ *
+ * Walks backwards on purpose: `RangeArcs` paints in array order, so the *last*
+ * matching range is the one drawn on top. Searching forwards would hand a touch
+ * to a band buried underneath, leaving the one you can actually see permanently
+ * unselectable — and with it unnameable, unmovable and undeletable. Paint order
+ * and hit order are two halves of one rule; keep them together.
+ */
+export function topmostAt(
+  list: { id: string; startMin: number; endMin: number }[],
+  min: number
+): string | null {
+  "worklet";
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    if (rangeContains(list[i].startMin, list[i].endMin, min)) return list[i].id;
+  }
+  return null;
+}
+
 /** How many minutes of track one pixel of arc covers, per ring. */
 export function minutesPerPx(ring: Ring): number {
   "worklet";

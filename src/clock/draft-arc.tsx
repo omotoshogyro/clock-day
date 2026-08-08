@@ -7,6 +7,7 @@ import {
   BAND,
   CX,
   CY,
+  DRAG_ALPHA,
   HANDLE_R,
   PILL_H,
   R_AM,
@@ -64,8 +65,14 @@ function draftSectors(
 }
 
 export type Draft = {
-  /** 0 idle, 1 while the finger is down or a range is being resized. */
+  /** 0 idle, 1 whenever the draft is standing in for a range. */
   active: SharedValue<number>;
+  /**
+   * 1 only while the finger is actually driving the band. Distinct from
+   * `active`, which stays 1 after a create so the draft can hold the range's
+   * place while its name is open — and that band should look settled.
+   */
+  live: SharedValue<number>;
   startMin: SharedValue<number>;
   /** Forward sweep in minutes, always >= 0. */
   sweepMin: SharedValue<number>;
@@ -143,7 +150,12 @@ export function DraftArc({
   const startY = useDerivedValue(() => startPos.value.y);
   const endX = useDerivedValue(() => endPos.value.x);
   const endY = useDerivedValue(() => endPos.value.y);
-  const opacity = useDerivedValue(() => draft.active.value);
+  // Translucent only while in hand, so the track underneath stays readable
+  // while you position it. The label pill nests inside this group and fades
+  // with it — a solid label on a faded band reads as a rendering fault.
+  const opacity = useDerivedValue(
+    () => draft.active.value * (draft.live.value ? DRAG_ALPHA : 1)
+  );
 
   // Always the pill form, even for a range whose committed label is curved
   // text: rebuilding a text path every frame on the UI thread is not worth the
