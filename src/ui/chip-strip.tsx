@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
+import { useReducedMotion } from "react-native-reanimated";
 import {
   Pressable,
   ScrollView,
@@ -33,14 +34,21 @@ export function ChipStrip({
   const layouts = useRef<Record<string, { x: number; w: number }>>({});
   const viewportW = useRef(0);
 
-  const centre = useCallback((key: string) => {
-    const l = layouts.current[key];
-    if (!l || !viewportW.current) return;
-    scroller.current?.scrollTo({
-      x: Math.max(0, l.x + l.w / 2 - viewportW.current / 2),
-      animated: true,
-    });
-  }, []);
+  // A plain ScrollView, so nothing honours Reduce Motion for us the way
+  // Reanimated does elsewhere — this one has to ask.
+  const reduceMotion = useReducedMotion();
+
+  const centre = useCallback(
+    (key: string) => {
+      const l = layouts.current[key];
+      if (!l || !viewportW.current) return;
+      scroller.current?.scrollTo({
+        x: Math.max(0, l.x + l.w / 2 - viewportW.current / 2),
+        animated: !reduceMotion,
+      });
+    },
+    [reduceMotion]
+  );
 
   useEffect(() => {
     // One frame's grace so the chips have reported their layout.
