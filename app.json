@@ -9,7 +9,8 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.okikiola.clockday"
+      "bundleIdentifier": "com.okikiola.clockday",
+      "appleTeamId": "344L4UAU47"
     },
     "android": {
       "package": "com.okikiola.clockday",
