@@ -1,4 +1,4 @@
-import { Canvas, Group, Path, Skia } from "@shopify/react-native-skia";
+import { Canvas, Circle, Group, Path, Skia } from "@shopify/react-native-skia";
 import { useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
@@ -6,7 +6,7 @@ import { MARKER_BY_ID } from "../constants";
 import { segmentsFor } from "../geometry";
 import type { DayPlan } from "../store/types";
 import type { Theme } from "../theme";
-import { MIN_PER_TURN, WEEKDAYS, monthGrid } from "../time";
+import { MIN_PER_TURN, WEEKDAYS, dayKeyOf, monthGrid } from "../time";
 
 const COLS = 7;
 const ROWS = 6;
@@ -15,6 +15,12 @@ export const CELL_H = 50;
 // Mini-ring radii echo the big dial: AM inside, PM outside.
 const MINI_R = [15, 19];
 const MINI_W = 3;
+/**
+ * The selected-day disc. Strictly inside MINI_R[0] so a day's arcs orbit the
+ * badge instead of being swallowed by it — at r >= 15 this would paint over the
+ * AM ring, which is the whole thing the calendar is there to show.
+ */
+const SEL_R = 13;
 
 type Props = {
   year: number;
@@ -70,6 +76,20 @@ export function CalendarGrid({
     return out;
   }, [cells, cellW, planFor]);
 
+  const todayKey = useMemo(() => dayKeyOf(new Date()), []);
+
+  // Kept out of the `arcs` memo so that one stays keyed on plan data alone.
+  // The selected day is often in a month you have browsed away from, hence the
+  // index guard rather than an unchecked lookup.
+  const selDisc = useMemo(() => {
+    const i = cells.findIndex((c) => c.key === selectedKey);
+    if (i < 0) return null;
+    return {
+      cx: (i % COLS) * cellW + cellW / 2,
+      cy: Math.floor(i / COLS) * CELL_H + CELL_H / 2,
+    };
+  }, [cells, cellW, selectedKey]);
+
   return (
     <View style={{ width }}>
       <View style={styles.weekRow}>
@@ -85,6 +105,16 @@ export function CalendarGrid({
 
       <View style={{ width, height }}>
         <Canvas style={StyleSheet.absoluteFill}>
+          {/* In the canvas, not a React View: the cells overlay sits *above*
+              this, so a View disc would paint over the day's arcs. */}
+          {selDisc && (
+            <Circle
+              cx={selDisc.cx}
+              cy={selDisc.cy}
+              r={SEL_R}
+              color={theme.chipOn}
+            />
+          )}
           <Group>
             {arcs.map((a, i) => (
               <Path
@@ -102,6 +132,16 @@ export function CalendarGrid({
         <View style={styles.cells}>
           {cells.map((cell) => {
             const selected = cell.key === selectedKey;
+            const isToday = cell.key === todayKey;
+            // Selected wins: the numeral sits on the disc and has to read
+            // against it. Today is only tinted when it is not the selection.
+            const ink = selected
+              ? theme.chipOnInk
+              : isToday
+                ? theme.accent
+                : cell.inMonth
+                  ? theme.ink
+                  : theme.subtle;
             return (
               <Pressable
                 key={cell.key}
@@ -115,9 +155,9 @@ export function CalendarGrid({
                   style={[
                     styles.day,
                     {
-                      color: cell.inMonth ? theme.ink : theme.subtle,
-                      opacity: cell.inMonth ? 1 : 0.45,
-                      fontWeight: selected ? "800" : "500",
+                      color: ink,
+                      opacity: cell.inMonth || selected ? 1 : 0.45,
+                      fontWeight: selected || isToday ? "800" : "500",
                     },
                   ]}
                 >

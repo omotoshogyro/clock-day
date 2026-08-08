@@ -81,7 +81,64 @@ export function formatRange(a: number, b: number): string {
   return `${formatTime(a)} – ${formatTime(b)}`;
 }
 
+/** "20m" · "2h" · "1h 30m". */
+export function formatDuration(mins: number): string {
+  "worklet";
+  const m = Math.round(mins);
+  const h = Math.floor(m / 60);
+  const r = m % 60;
+  if (h === 0) return `${r}m`;
+  return r === 0 ? `${h}h` : `${h}h ${r}m`;
+}
+
+/**
+ * "5am – 7am · 2h". Written from the pan during a drag, so it stays a worklet.
+ * The zero guard matters: a create begins with start === end, and without it
+ * the readout flashes "· 0m" on every touch-down.
+ */
+export function formatRangeDetail(a: number, b: number): string {
+  "worklet";
+  const d = sweepMin(a, b);
+  return d <= 0
+    ? formatRange(a, b)
+    : `${formatRange(a, b)} · ${formatDuration(d)}`;
+}
+
 // ---- Calendar helpers (JS thread only) ---------------------------------
+
+/**
+ * Total minutes covered by a day's ranges, counting overlaps once.
+ *
+ * Summing sweeps would double-count exactly on the days where two bands sit on
+ * top of each other, so project each onto a flat line, merge, then measure.
+ * A wrapping range runs past MIN_PER_DAY, hence the 0…2*MIN_PER_DAY span.
+ */
+export function plannedMinutes(
+  ranges: { startMin: number; endMin: number }[]
+): number {
+  if (ranges.length === 0) return 0;
+
+  const spans = ranges
+    .map((r) => ({ from: r.startMin, to: r.startMin + sweepMin(r.startMin, r.endMin) }))
+    .filter((s) => s.to > s.from)
+    .sort((a, b) => a.from - b.from);
+  if (spans.length === 0) return 0;
+
+  let total = 0;
+  let { from, to } = spans[0];
+  for (let i = 1; i < spans.length; i += 1) {
+    const s = spans[i];
+    if (s.from > to) {
+      total += to - from;
+      from = s.from;
+      to = s.to;
+    } else if (s.to > to) {
+      to = s.to;
+    }
+  }
+  total += to - from;
+  return Math.min(total, MIN_PER_DAY);
+}
 
 export const WEEKDAYS = ["S", "M", "T", "W", "T", "F", "S"];
 export const MONTHS = [
@@ -124,6 +181,29 @@ export function parseDayKey(key: string): {
 } {
   const [y, m, d] = key.split("-").map(Number);
   return { year: y, month: m - 1, day: d };
+}
+
+/**
+ * A local `Date` for a minute-of-day on a given day.
+ *
+ * The component constructor deliberately, not `midnightMs + min * 60_000`:
+ * across a daylight-saving boundary the day is not 1440 minutes long, so the
+ * arithmetic form is an hour out twice a year — in a way that will not
+ * reproduce when you go looking for it.
+ *
+ * It also normalises out of range in both directions, which is load-bearing
+ * here rather than incidental. Past 1439 rolls into the next day, which is how
+ * a range that wraps midnight gets its end; below 0 rolls into the previous
+ * one, which is how a lead time on an 00:05 start lands the night before.
+ */
+export function dateAt(key: string, min: number): Date {
+  const { year, month, day } = parseDayKey(key);
+  return new Date(year, month, day, 0, min, 0, 0);
+}
+
+export function shiftDayKey(key: string, days: number): string {
+  const { year, month, day } = parseDayKey(key);
+  return dayKeyOf(new Date(year, month, day + days));
 }
 
 /** "Wednesday 29" */

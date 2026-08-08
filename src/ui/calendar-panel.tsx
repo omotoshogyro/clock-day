@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { ScrollView, StyleSheet, View } from "react-native";
 import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -6,7 +6,10 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { DialFonts } from "../clock/fonts";
 import type { Now } from "../clock/use-now";
 import { SCREEN_W } from "../constants";
-import { usePlanner } from "../store/planner-context";
+import {
+  usePlannerActions,
+  usePlannerState,
+} from "../store/planner-context";
 import type { Theme } from "../theme";
 import { MONTHS, parseDayKey } from "../time";
 import { CalendarGrid } from "./calendar-grid";
@@ -24,18 +27,13 @@ type Props = {
 };
 
 export function CalendarPanel({ onClose, theme, fonts, now }: Props) {
-  const planner = usePlanner();
+  const { selectedDay, planFor, day } = usePlannerState();
+  const { selectDay } = usePlannerActions();
   const insets = useSafeAreaInsets();
-  const selected = parseDayKey(planner.selectedDay);
+  const selected = parseDayKey(selectedDay);
 
   const [year, setYear] = useState(selected.year);
   const [month, setMonth] = useState(selected.month);
-
-  // Months are generated lazily, so browsing to one that has never been shown
-  // fills in its mock plans before the grid asks for them.
-  useEffect(() => {
-    planner.ensureMonth(year, month);
-  }, [year, month, planner]);
 
   const monthItems = useMemo(
     () => MONTHS.map((m, i) => ({ key: String(i), label: m })),
@@ -82,10 +80,10 @@ export function CalendarPanel({ onClose, theme, fonts, now }: Props) {
         <CalendarGrid
           year={year}
           month={month}
-          selectedKey={planner.selectedDay}
-          planFor={planner.planFor}
+          selectedKey={selectedDay}
+          planFor={planFor}
           onSelect={(key) => {
-            planner.selectDay(key);
+            selectDay(key);
             onClose();
           }}
           theme={theme}
@@ -94,7 +92,7 @@ export function CalendarPanel({ onClose, theme, fonts, now }: Props) {
 
         <View style={styles.miniWrap}>
           <MiniClock
-            ranges={planner.day.ranges}
+            ranges={day.ranges}
             theme={theme}
             fonts={fonts}
             now={now}

@@ -63,6 +63,13 @@ export const PILL_MAX_MIN = 40;
 /** Pill height. Deliberately slimmer than BAND, as in the reference. */
 export const PILL_H = 30;
 
+/**
+ * Opacity of the band under the finger while it is being drawn, resized or
+ * moved. Lets the dotted track and the numerals read through it so you can see
+ * where you are putting it; a settled band is always full strength.
+ */
+export const DRAG_ALPHA = 0.65;
+
 // ---- Face detail -------------------------------------------------------
 // Also proportional, so the dial stays balanced on any screen size.
 export const TICK_LEN_MINOR = 4;

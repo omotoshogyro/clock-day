@@ -7,7 +7,9 @@ import type { Theme } from "../theme";
 import { ClockFace } from "./clock-face";
 import { ClockHands } from "./clock-hands";
 import { DotRings } from "./dot-rings";
-import { DraftArc, type Draft } from "./draft-arc";
+import { DraftArc, type Draft, type DraftLabel } from "./draft-arc";
+import { GhostHint } from "./ghost-hint";
+import { NowMarker } from "./now-marker";
 import { RangeArcs } from "./range-arcs";
 import type { DialFonts } from "./fonts";
 import type { Now } from "./use-now";
@@ -22,7 +24,11 @@ type Props = {
   draft: Draft;
   draftFill: string;
   draftEdge: string;
+  draftLabel: DraftLabel | null;
+  draftInk: string;
   ringActive: SharedValue<number>;
+  /** Show the empty-day teaching arc. */
+  showHint?: boolean;
 };
 
 /**
@@ -40,12 +46,17 @@ export function ClockCanvas({
   draft,
   draftFill,
   draftEdge,
+  draftLabel,
+  draftInk,
   ringActive,
+  showHint,
 }: Props) {
   return (
     <Canvas style={{ width: CANVAS, height: CANVAS }}>
       <Group>
         <DotRings theme={theme} active={ringActive} />
+        {/* Under the bands, so the first real range paints straight over it. */}
+        {showHint && <GhostHint theme={theme} />}
         <RangeArcs
           ranges={ranges}
           selectedId={selectedId}
@@ -57,8 +68,14 @@ export function ClockCanvas({
           draft={draft}
           fill={draftFill}
           edge={draftEdge}
+          label={draftLabel}
+          ink={draftInk}
+          fonts={fonts}
           theme={theme}
         />
+        {/* Above the bands so it stays visible over a painted arc, below the
+            face and hands so they keep the top of the stack. */}
+        <NowMarker now={now} theme={theme} />
         <ClockFace theme={theme} fonts={fonts} />
         <ClockHands theme={theme} now={now} />
       </Group>

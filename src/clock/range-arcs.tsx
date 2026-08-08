@@ -32,6 +32,8 @@ import type { Theme } from "../theme";
 import type { RangeItem } from "../store/types";
 import type { DialFonts } from "./fonts";
 
+type Built = ReturnType<typeof buildRange>;
+
 type Props = {
   ranges: RangeItem[];
   selectedId: string | null;
@@ -58,95 +60,126 @@ export function RangeArcs({
 
   return (
     <Group>
-      {built.map((b) => {
-        const marker = MARKER_BY_ID[b.range.markerId];
-        const selected = b.range.id === selectedId;
-        // A pill already covers the whole (tiny) span, so drawing the arc under
-        // it just adds lumps around the edges.
-        const showArcs = b.label?.kind !== "pill";
-        return (
-          <Group key={b.range.id}>
-            {selected &&
-              showArcs &&
-              b.segments.map((s, i) => (
-                <Path key={`edge-${i}`} path={s.edgePath} color={marker.edge} />
-              ))}
-            {showArcs &&
-              b.segments.map((s, i) => (
-                <Path key={`fill-${i}`} path={s.path} color={marker.fill} />
-              ))}
+      {/* Array order is paint order, so the last range wins where two overlap.
+          `topmostAt` in geometry.ts walks backwards to match — change one and
+          the visible band stops being the touchable one. */}
+      {built.map((b) => (
+        <RangeArc
+          key={b.range.id}
+          built={b}
+          selected={b.range.id === selectedId}
+          theme={theme}
+          fonts={fonts}
+        />
+      ))}
+    </Group>
+  );
+}
 
-            {b.label?.kind === "curved" && (
-              <TextPath
-                path={b.label.path}
-                text={b.range.title}
-                font={fonts.label}
-                color={marker.labelInk}
-                initialOffset={b.label.offset}
-              />
-            )}
+/**
+ * One band. Split out of the map above only because the past-dimming opacity
+ * needs a hook, and hooks cannot live inside a `.map`. The render order of the
+ * parent is unchanged, and it must stay that way — see the note there.
+ */
+function RangeArc({
+  built: b,
+  selected,
+  theme,
+  fonts,
+}: {
+  built: Built;
+  selected: boolean;
+  theme: Theme;
+  fonts: DialFonts;
+}) {
+  const marker = MARKER_BY_ID[b.range.markerId];
+  // A pill already covers the whole (tiny) span, so drawing the arc under
+  // it just adds lumps around the edges.
+  const showArcs = b.label?.kind !== "pill";
 
-            {b.label?.kind === "pill" && (
-              <Group>
-                {selected && (
-                  <RoundedRect
-                    x={b.label.x - 2}
-                    y={b.label.y - 2}
-                    width={b.label.w + 4}
-                    height={b.label.h + 4}
-                    r={(b.label.h + 4) / 2}
-                    color={marker.edge}
-                  />
-                )}
-                <RoundedRect
-                  x={b.label.x}
-                  y={b.label.y}
-                  width={b.label.w}
-                  height={b.label.h}
-                  r={b.label.h / 2}
-                  color={marker.fill}
-                />
-                <Text
-                  x={b.label.textX}
-                  y={b.label.textY}
-                  text={b.range.title}
-                  font={fonts.mini}
-                  color={marker.labelInk}
-                />
-              </Group>
-            )}
+  // A committed band is always full strength. The translucency lives on the
+  // draft instead, so it reads as "this one is in your hand" rather than as a
+  // permanent property of the arc.
+  return (
+    <Group>
+      {selected &&
+        showArcs &&
+        b.segments.map((s, i) => (
+          <Path key={`edge-${i}`} path={s.edgePath} color={marker.edge} />
+        ))}
+      {showArcs &&
+        b.segments.map((s, i) => (
+          <Path key={`fill-${i}`} path={s.path} color={marker.fill} />
+        ))}
 
-            {selected && (
-              <Group>
-                <Circle
-                  cx={b.startPt.x}
-                  cy={b.startPt.y}
-                  r={HANDLE_R}
-                  color={marker.edge}
-                />
-                <Circle
-                  cx={b.endPt.x}
-                  cy={b.endPt.y}
-                  r={HANDLE_R}
-                  color={marker.edge}
-                />
-                <Circle
-                  cx={b.startPt.x}
-                  cy={b.startPt.y}
-                  r={HANDLE_R - 3.5}
-                  color={theme.faceBg}
-                />
-                <Circle
-                  cx={b.endPt.x}
-                  cy={b.endPt.y}
-                  r={HANDLE_R - 3.5}
-                  color={theme.faceBg}
-                />
-              </Group>
-            )}
-          </Group>
-        );
-      })}
+      {b.label?.kind === "curved" && (
+        <TextPath
+          path={b.label.path}
+          text={b.range.title}
+          font={fonts.label}
+          color={marker.labelInk}
+          initialOffset={b.label.offset}
+        />
+      )}
+
+      {b.label?.kind === "pill" && (
+        <Group>
+          {selected && (
+            <RoundedRect
+              x={b.label.x - 2}
+              y={b.label.y - 2}
+              width={b.label.w + 4}
+              height={b.label.h + 4}
+              r={(b.label.h + 4) / 2}
+              color={marker.edge}
+            />
+          )}
+          <RoundedRect
+            x={b.label.x}
+            y={b.label.y}
+            width={b.label.w}
+            height={b.label.h}
+            r={b.label.h / 2}
+            color={marker.fill}
+          />
+          <Text
+            x={b.label.textX}
+            y={b.label.textY}
+            text={b.range.title}
+            font={fonts.mini}
+            color={marker.labelInk}
+          />
+        </Group>
+      )}
+
+      {selected && (
+        <Group>
+          <Circle
+            cx={b.startPt.x}
+            cy={b.startPt.y}
+            r={HANDLE_R}
+            color={marker.edge}
+          />
+          <Circle
+            cx={b.endPt.x}
+            cy={b.endPt.y}
+            r={HANDLE_R}
+            color={marker.edge}
+          />
+          <Circle
+            cx={b.startPt.x}
+            cy={b.startPt.y}
+            r={HANDLE_R - 3.5}
+            color={theme.faceBg}
+          />
+          <Circle
+            cx={b.endPt.x}
+            cy={b.endPt.y}
+            r={HANDLE_R - 3.5}
+            color={theme.faceBg}
+          />
+        </Group>
+      )}
     </Group>
   );
 }

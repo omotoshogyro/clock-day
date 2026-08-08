@@ -2,7 +2,6 @@ import { LinearGradient } from "expo-linear-gradient";
 import { Pressable, StyleSheet, View } from "react-native";
 import Animated, {
   useAnimatedStyle,
-  useReducedMotion,
   withSpring,
   withTiming,
 } from "react-native-reanimated";
@@ -28,17 +27,16 @@ type Props = {
  * how the reference signals which colour is active.
  */
 export function MarkerPen({ marker, selected, onPress }: Props) {
-  const reduceMotion = useReducedMotion();
-  const spring = reduceMotion ? { duration: 0 } : SNAPPY;
-  const timing = reduceMotion ? { duration: 0 } : QUICK;
-
+  // No reduced-motion branch here: withSpring/withTiming default to
+  // ReduceMotion.System, so they already snap to the end value when the system
+  // setting is on.
   const penStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: withSpring(selected ? -14 : 0, spring) }],
+    transform: [{ translateY: withSpring(selected ? -14 : 0, SNAPPY) }],
   }));
 
   const capStyle = useAnimatedStyle(() => ({
-    opacity: withTiming(selected ? 0 : 1, timing),
-    transform: [{ translateY: withSpring(selected ? -22 : 0, spring) }],
+    opacity: withTiming(selected ? 0 : 1, QUICK),
+    transform: [{ translateY: withSpring(selected ? -22 : 0, SNAPPY) }],
   }));
 
   return (
